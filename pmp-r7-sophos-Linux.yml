@@ -1,0 +1,186 @@
+---
+schemaVersion: "2.2"
+description: Install Sophos, Rapid7 and Patch manager Plus for Linux
+parameters:
+  token:
+    type: String
+    default: "{{ ssm:r7-token}}"
+
+  executionTimeout:
+    type: String
+    default: "3600"
+
+mainSteps:
+  - action: aws:downloadContent
+    name: downloadSophos
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      SourceType: S3
+      SourceInfo:
+        path: https://svd-dco-patch-ami-imagebuilder.s3.eu-west-1.amazonaws.com/linux/SophosSetup.sh
+      destinationPath: /tmp/dco-705924564/
+  - action: aws:downloadContent
+    name: downloadRapid7
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      SourceType: S3
+      SourceInfo:
+        path: https://svd-dco-patch-ami-imagebuilder.s3.eu-west-1.amazonaws.com/linux/rapid7-insight-agent_4.0.8.28-1_amd64.deb
+      destinationPath: /tmp/dco-705924564/
+  - action: aws:downloadContent
+    name: downloadPmp
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      SourceType: S3
+      SourceInfo:
+        path: https://svd-dco-patch-ami-imagebuilder.s3.eu-west-1.amazonaws.com/linux/pmpagent.zip
+      destinationPath: /tmp/dco-705924564/
+
+  - action: aws:downloadContent
+    name: downloadUnzipScript
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      SourceType: S3
+      SourceInfo:
+        path: https://svd-dco-patch-ami-imagebuilder.s3.eu-west-1.amazonaws.com/linux/unzipfile.py
+      destinationPath: /tmp/dco-705924564/
+  - action: aws:runShellScript
+    name: InstallingPrograms
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      timeoutSeconds: "{{ executionTimeout }}"
+      runCommand:
+        - |
+          pmpserver="pmp001.suvoda.cloud"
+          pmpport=6383
+          wdir=/tmp/dco-705924564
+          
+          sudo su
+
+          if [ -d $wdir ]
+          then
+              cd $wdir
+          else
+              echo "Unable to locate the download directory $wdir"
+            exit 99
+          fi
+
+
+          # Get the distribution
+          . /etc/os-release
+
+          case $ID in
+            ubuntu) osname="ubuntu"
+            ;;
+            rhel) osname="redhat"
+            ;;
+            centos) osname="centos"
+            ;;
+            arch) osname="arch"
+            ;;
+            *) osname="Unable to determine the distribution"
+            ;;
+          esac
+          
+          # Get the architecture
+          architecture=$(uname -m)
+
+          if [ "$architecture" = x86_64 ];
+          then
+              archcode="amd64"
+          elif [ "$architecture" = ARM64 ]
+          then
+              archcode="arm64"
+          else
+              echo "Unable to determine platform"
+          fi
+
+
+          # Check if PMP is installed
+
+          if sudo systemctl is-active --quiet dcservice.service
+          then
+              echo "pmp is installed and running"
+          else
+              echo "pmp is NOT installed ... installing the $osname package"
+              python3 unzipfile.py
+              if [ -f UEMS_LinuxAgent.bin ] && [ -f serverinfo.json ]
+              then
+                  if nc -z -v -w5 $pmpserver $pmpport
+                  then
+                    sudo chmod +x UEMS_LinuxAgent.bin && sudo ./UEMS_LinuxAgent.bin
+                  else
+                    echo "Unable to reach $pmpserver on port $pmpport"
+                  fi
+              fi
+          fi
+
+
+          # Check if rapid7 is installed
+
+          if systemctl is-active --quiet ir_agent.service
+          then
+              echo "Rapid7 agent is installed and running"
+          else
+              version=$(ls rapid7*)
+              version="${version#rapid7-insight-agent_}"
+              version="${version%-1_amd64.deb}"
+              architecture=$(uname -m)
+            
+              if [ "$osname" = "ubuntu" ] && [ "$archcode" = amd64 ]
+              then
+                filename="rapid7-insight-agent-${version}-1.${archcode}.deb"
+                scriptLocation="/opt/rapid7/ir_agent/components/insight_agent/${version}"
+                echo "Installing rapid7 version $version, $archcode package on $architecture system"
+                mv rapid* $filename
+                executable="${wdir}/${filename}"
+                apt-get install $executable -y
+                cd $scriptLocation
+                ./configure_agent.sh --token {{ token }}
+
+              else
+                echo "Rapid7: Incompatible distribution or architecture"
+              fi
+          fi
+
+          # Check if Sophos is installed
+
+          if sudo systemctl is-active --quiet sophos-spl.service
+          then
+              echo "Sophos is installed and running"
+          else
+
+            if [ -f SophosSetup.sh ]
+            then
+                echo "Installing Sophos ..."
+                sudo chmod +x SophosSetup.sh && sudo ./SophosSetup.sh --do-not-disable-auditd
+            else
+                echo "Unable to locate the SophosSetup.sh script "
+            fi
+          fi
+
+  - action: aws:runShellScript
+    name: PostInstallationCleanup
+    precondition:
+      StringEquals:
+      - platformType
+      - Linux
+    inputs:
+      timeoutSeconds: "{{ executionTimeout }}"
+      runCommand:
+        - rm -rf /tmp/dco-705924564
